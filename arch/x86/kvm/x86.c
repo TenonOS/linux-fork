@@ -9905,6 +9905,10 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 		vcpu->arch.complete_userspace_io = complete_hypercall_exit;
 		return 0;
 	}
+	case KVM_HC_FORK_VM: {
+		/* Begin fork */
+		/* TODO: Choose different return value by some flag */
+	}
 	default:
 		ret = -KVM_ENOSYS;
 		break;
