@@ -63,6 +63,7 @@
 #include <linux/entry-kvm.h>
 #include <linux/suspend.h>
 #include <linux/smp.h>
+#include <linux/delay.h>
 
 #include <trace/events/ipi.h>
 #include <trace/events/kvm.h>
@@ -10119,7 +10120,7 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 		save_kvm_state_to_snapshot(vcpu, &default_kvm_state);
 		save_kvm_userspace_memslot_mapping(&default_kvm_state, vcpu);
 //		printk_show_memory_slot_in_userspace_mem(&default_kvm_state);
-		while(1);                                                      // Test whether another vm can restored itself from snapshot
+		msleep(60000);                                                      // Test whether another vm can restored itself from snapshot
         ret = 0;
         break;
 	}
