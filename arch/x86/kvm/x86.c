@@ -9944,24 +9944,22 @@ static void restore_vcpu_state_from_snapshot(struct kvm_vcpu *vcpu, kvm_state_ct
 // Mainly used for testing
 kvm_state_ctx default_kvm_state;
 
-void printk_show_memory_slot_in_userspace_mem1(int slot_num, struct kvm_memory_slot *kvm_mem_slot) {
-	printk(KERN_INFO "slot:%d flags:%x guest_phys_addr:%lx mem_size:%ld userspace_addr:%llx\n", kvm_mem_slot->id +  kvm_mem_slot->as_id << PAGE_SHIFT, kvm_mem_slot->flags, 
-	       kvm_mem_slot->userspace_addr, kvm_mem_slot->npages << PAGE_SHIFT, kvm_mem_slot->base_gfn << PAGE_SHIFT);
+void printk_show_memory_slot_in_userspace_mem1(int slot_num, struct kvm_memory_slot *mem_slot) {
+	printk(KERN_INFO "slot:%d flags:%x guest_phys_addr:%lx mem_size:%ld userspace_addr:%llx\n", mem_slot->id +  mem_slot->as_id << PAGE_SHIFT, mem_slot->flags, 
+	       mem_slot->userspace_addr, mem_slot->npages << PAGE_SHIFT, mem_slot->base_gfn << PAGE_SHIFT);
 }
 
 void printk_show_mem_slots_info(struct kvm_vcpu *vcpu) {
-	/*
+	struct hlist_node *idnode;
 	struct kvm *kvm_instance = vcpu->kvm;
 	int i = 0;
-	int j = 0;
+	int bkt;
 	for (; i < KVM_ADDRESS_SPACE_NUM; i++) {
-		printk(KERN_INFO "now we are at address space:%d we got %d entries\n", i, kvm_instance->memslots[i]->last_used_slot);
-		for (; j < kvm_instance->memslots[i]->last_used_slot; j++) {
-			printk_show_memory_slot_in_userspace_mem1(j, &kvm_instance->memslots[i]->memslots[j]);
-		}
-		j = 0;
+		struct kvm_memslots *slots = vcpu->kvm->memslots[i];
+		struct kvm_memory_slot *memslot;
+		hash_for_each_safe(slots->id_hash, bkt, idnode, memslot, id_node[1])
+		    printk_show_memory_slot_in_userspace_mem1(bkt, memslot);
 	}
-	*/
 }
 
 // Borrowed from virt/kvm/kvm_main.c
