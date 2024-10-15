@@ -33,6 +33,7 @@
 #include "lapic.h"
 #include "xen.h"
 #include "smm.h"
+#include "kvm_state_ctx.h"
 
 #include <linux/clocksource.h>
 #include <linux/interrupt.h>
@@ -129,8 +130,19 @@ static void store_regs(struct kvm_vcpu *vcpu);
 static int sync_regs(struct kvm_vcpu *vcpu);
 static int kvm_vcpu_do_singlestep(struct kvm_vcpu *vcpu);
 
+static void __get_regs(struct kvm_vcpu *vcpu, struct kvm_regs *regs);
+static void __get_sregs(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs);
+
+static void __set_regs(struct kvm_vcpu *vcpu, struct kvm_regs *regs);
+static int __set_sregs(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs);
+
 static int __set_sregs2(struct kvm_vcpu *vcpu, struct kvm_sregs2 *sregs2);
 static void __get_sregs2(struct kvm_vcpu *vcpu, struct kvm_sregs2 *sregs2);
+
+int kvm_arch_vcpu_ioctl_get_mpstate_without_vcpu(struct kvm_vcpu *vcpu, struct kvm_mp_state *mp_state);
+int kvm_arch_vcpu_ioctl_set_mpstate_without_vcpu(struct kvm_vcpu *vcpu, struct kvm_mp_state *mp_state);
+
+void kvm_arch_free_memslot(struct kvm *kvm, struct kvm_memory_slot *slot);
 
 static DEFINE_MUTEX(vendor_module_lock);
 struct kvm_x86_ops kvm_x86_ops __read_mostly;
@@ -9814,6 +9826,204 @@ static int complete_hypercall_exit(struct kvm_vcpu *vcpu)
 	return kvm_skip_emulated_instruction(vcpu);
 }
 
+static void read_into_kvm_sregs(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs) {
+	if (vcpu->arch.guest_state_protected) {
+		printk(KERN_INFO "arch guest state is protected, you may get trouble when trying to get it's info.\n");
+		return ;
+	}
+	struct desc_ptr dt;
+	kvm_get_segment(vcpu, &sregs->cs, VCPU_SREG_CS);
+	kvm_get_segment(vcpu, &sregs->ds, VCPU_SREG_DS);
+	kvm_get_segment(vcpu, &sregs->es, VCPU_SREG_ES);
+	kvm_get_segment(vcpu, &sregs->fs, VCPU_SREG_FS);
+	kvm_get_segment(vcpu, &sregs->gs, VCPU_SREG_GS);
+	kvm_get_segment(vcpu, &sregs->ss, VCPU_SREG_SS);
+
+	kvm_get_segment(vcpu, &sregs->tr, VCPU_SREG_TR);
+	kvm_get_segment(vcpu, &sregs->ldt, VCPU_SREG_LDTR);
+
+	static_call(kvm_x86_get_idt)(vcpu, &dt);
+	sregs->idt.limit = dt.size;
+	sregs->idt.base = dt.address;
+	static_call(kvm_x86_get_gdt)(vcpu, &dt);
+	sregs->gdt.limit = dt.size;
+	sregs->gdt.base = dt.address;
+
+	sregs->cr2 = vcpu->arch.cr2;
+	sregs->cr3 = kvm_read_cr3(vcpu);
+
+	sregs->cr0 = kvm_read_cr0(vcpu);
+	sregs->cr4 = kvm_read_cr4(vcpu);
+	sregs->cr8 = kvm_get_cr8(vcpu);
+	sregs->efer = vcpu->arch.efer;
+	sregs->apic_base = kvm_get_apic_base(vcpu);
+}
+
+static void read_into_kvm_regs(struct kvm_vcpu *vcpu, struct kvm_regs *regs) {
+	regs->rax = kvm_rax_read(vcpu);
+	regs->rbx = kvm_rbx_read(vcpu);
+	regs->rcx = kvm_rcx_read(vcpu);
+	regs->rdx = kvm_rdx_read(vcpu);
+	regs->rbp = kvm_rbp_read(vcpu);
+	regs->rsi = kvm_rsi_read(vcpu);
+	regs->rdi = kvm_rdi_read(vcpu);
+
+	regs->r8 = kvm_r8_read(vcpu);
+	regs->r9 = kvm_r9_read(vcpu);
+	regs->r10 = kvm_r10_read(vcpu);
+	regs->r11 = kvm_r11_read(vcpu);
+	regs->r12 = kvm_r12_read(vcpu);
+	regs->r13 = kvm_r13_read(vcpu);
+	regs->r14 = kvm_r14_read(vcpu);
+	regs->r15 = kvm_r15_read(vcpu);
+}
+
+static void read_into_kvm_fpu(struct kvm_vcpu *vcpu, struct kvm_fpu *fpu) {
+	struct fxregs_state *fxsave;
+	if (fpstate_is_confidential(&vcpu->arch.guest_fpu)) {
+		return ;
+	}
+	fxsave = &vcpu->arch.guest_fpu.fpstate->regs.fxsave;
+	memcpy(fpu->fpr, fxsave->st_space, 128);
+	fpu->fcw = fxsave->cwd;
+	fpu->fsw = fxsave->swd;
+	fpu->ftwx = fxsave->twd;
+	fpu->last_opcode = fxsave->fop;
+	fpu->last_ip = fxsave->rip;
+	fpu->last_dp = fxsave->rdp;
+	memcpy(fpu->xmm, fxsave->xmm_space, sizeof(fxsave->xmm_space));
+}
+
+static void save_kvm_state_to_snapshot(struct kvm_vcpu *vcpu, kvm_state_ctx *kvm_state) {
+		kvm_state->irqchip[0].chip_id = KVM_IRQCHIP_PIC_MASTER;
+		kvm_state->irqchip[1].chip_id = KVM_IRQCHIP_PIC_SLAVE;
+		kvm_state->irqchip[2].chip_id = KVM_IRQCHIP_IOAPIC;
+
+        __get_regs(vcpu, &kvm_state->regs);
+		__get_sregs(vcpu, &kvm_state->sregs);
+		read_into_kvm_fpu(vcpu, &kvm_state->fpu);
+		kvm_vcpu_ioctl_x86_get_xsave(vcpu, &kvm_state->xsave);
+		kvm_vcpu_ioctl_x86_get_vcpu_events(vcpu, &kvm_state->events);
+		kvm_vcpu_ioctl_get_lapic(vcpu, &kvm_state->lapic);
+		kvm_vcpu_ioctl_x86_get_xcrs(vcpu, &kvm_state->xcrs);
+
+		kvm_vm_ioctl_get_irqchip(vcpu->kvm, &kvm_state->irqchip[0]);
+		kvm_vm_ioctl_get_irqchip(vcpu->kvm, &kvm_state->irqchip[1]);
+		kvm_vm_ioctl_get_irqchip(vcpu->kvm, &kvm_state->irqchip[2]);
+		u64 now_ns;
+
+		now_ns = get_kvmclock_ns(vcpu->kvm);
+		kvm_state->user_ns.clock = now_ns;
+		kvm_state->user_ns.flags = vcpu->kvm->arch.use_master_clock ? KVM_CLOCK_TSC_STABLE : 0;
+		memset(&kvm_state->user_ns.pad, 0, sizeof(kvm_state->user_ns.pad));
+		
+		kvm_vm_ioctl_get_pit2(vcpu->kvm, &kvm_state->pit2);
+		kvm_arch_vcpu_ioctl_get_mpstate_without_vcpu(vcpu, &kvm_state->mp_state);
+		kvm_vcpu_ioctl_x86_get_debugregs(vcpu, &kvm_state->debugregs);
+}
+
+static void restore_vcpu_state_from_snapshot(struct kvm_vcpu *vcpu, kvm_state_ctx *kvm_state) {
+	__set_regs(vcpu, &kvm_state->regs);
+	__set_sregs(vcpu, &kvm_state->sregs);
+
+	kvm_vcpu_ioctl_x86_set_xsave(vcpu, &kvm_state->xsave);
+	kvm_vcpu_ioctl_x86_set_vcpu_events(vcpu, &kvm_state->events);
+	kvm_vcpu_ioctl_set_lapic(vcpu, &kvm_state->lapic);
+	kvm_vcpu_ioctl_x86_set_xcrs(vcpu, &kvm_state->xcrs);
+
+	kvm_vm_ioctl_set_irqchip(vcpu->kvm, &kvm_state->irqchip[0]);
+	kvm_vm_ioctl_set_irqchip(vcpu->kvm, &kvm_state->irqchip[1]);
+	kvm_vm_ioctl_set_irqchip(vcpu->kvm, &kvm_state->irqchip[2]);
+
+	kvm_vm_ioctl_set_pit2(vcpu->kvm, &kvm_state->pit2);
+	kvm_arch_vcpu_ioctl_set_mpstate_without_vcpu(vcpu, &kvm_state->mp_state);
+	kvm_vcpu_ioctl_x86_set_debugregs(vcpu, &kvm_state->debugregs);
+}
+
+// Mainly used for testing
+kvm_state_ctx default_kvm_state;
+
+void printk_show_memory_slot_in_userspace_mem1(int slot_num, struct kvm_memory_slot *kvm_mem_slot) {
+	printk(KERN_INFO "slot:%d flags:%x guest_phys_addr:%lx mem_size:%ld userspace_addr:%llx\n", kvm_mem_slot->id +  kvm_mem_slot->as_id << PAGE_SHIFT, kvm_mem_slot->flags, 
+	       kvm_mem_slot->userspace_addr, kvm_mem_slot->npages << PAGE_SHIFT, kvm_mem_slot->base_gfn << PAGE_SHIFT);
+}
+
+void printk_show_mem_slots_info(struct kvm_vcpu *vcpu) {
+	/*
+	struct kvm *kvm_instance = vcpu->kvm;
+	int i = 0;
+	int j = 0;
+	for (; i < KVM_ADDRESS_SPACE_NUM; i++) {
+		printk(KERN_INFO "now we are at address space:%d we got %d entries\n", i, kvm_instance->memslots[i]->last_used_slot);
+		for (; j < kvm_instance->memslots[i]->last_used_slot; j++) {
+			printk_show_memory_slot_in_userspace_mem1(j, &kvm_instance->memslots[i]->memslots[j]);
+		}
+		j = 0;
+	}
+	*/
+}
+
+// Borrowed from virt/kvm/kvm_main.c
+static void kvm_alloc_memslots(struct kvm *kvm)
+{
+	int i, j;
+	struct kvm_memslots *slots;
+	for (i = 0; i < KVM_ADDRESS_SPACE_NUM; i++) {
+		for (j = 0; j < 2; j++) {
+			slots = &kvm->__memslots[i][j];
+
+			atomic_long_set(&slots->last_used_slot, (unsigned long)NULL);
+			slots->hva_tree = RB_ROOT_CACHED;
+			slots->gfn_tree = RB_ROOT;
+			hash_init(slots->id_hash);
+			slots->node_idx = j;
+
+			/* Generations must be different for each address space. */
+			slots->generation = i;
+		}
+
+		rcu_assign_pointer(kvm->memslots[i], &kvm->__memslots[i][0]);
+	}
+}
+
+static void kvm_destroy_dirty_bitmap(struct kvm_memory_slot *memslot)
+{
+	if (!memslot->dirty_bitmap)
+		return;
+
+	kvfree(memslot->dirty_bitmap);
+	memslot->dirty_bitmap = NULL;
+}
+
+/* This does not remove the slot from struct kvm_memslots data structures */
+static void kvm_free_memslot(struct kvm *kvm, struct kvm_memory_slot *slot)
+{
+	kvm_destroy_dirty_bitmap(slot);
+
+	kvm_arch_free_memslot(kvm, slot);
+
+	kfree(slot);
+}
+
+static void kvm_free_memslots(struct kvm *kvm, struct kvm_memslots *slots)
+{
+	struct hlist_node *idnode;
+	struct kvm_memory_slot *memslot;
+	int bkt;
+
+	/*
+	 * The same memslot objects live in both active and inactive sets,
+	 * arbitrarily free using index '1' so the second invocation of this
+	 * function isn't operating over a structure with dangling pointers
+	 * (even though this function isn't actually touching them).
+	 */
+	if (!slots->node_idx)
+		return;
+
+	hash_for_each_safe(slots->id_hash, bkt, idnode, memslot, id_node[1])
+		kvm_free_memslot(kvm, memslot);
+}
+
 int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 {
 	unsigned long nr, a0, a1, a2, a3, ret;
@@ -9904,6 +10114,34 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 		WARN_ON_ONCE(vcpu->run->hypercall.flags & KVM_EXIT_HYPERCALL_MBZ);
 		vcpu->arch.complete_userspace_io = complete_hypercall_exit;
 		return 0;
+	}
+	case KVM_HC_PREPARE_FORK: {
+		save_kvm_state_to_snapshot(vcpu, &default_kvm_state);
+		save_kvm_userspace_memslot_mapping(&default_kvm_state, vcpu);
+//		printk_show_memory_slot_in_userspace_mem(&default_kvm_state);
+		while(1);                                                      // Test whether another vm can restored itself from snapshot
+        ret = 0;
+        break;
+	}
+	case KVM_HC_RESTORE_FORK: {
+		printk_show_mem_slots_info(vcpu);
+		printk_show_memory_slot_in_userspace_mem(&default_kvm_state);
+		restore_vcpu_state_from_snapshot(vcpu, &default_kvm_state);
+		kvm_free_memslots(vcpu->kvm, vcpu->kvm->memslots[0]);
+		kvm_free_memslots(vcpu->kvm, vcpu->kvm->memslots[1]);
+		kvm_alloc_memslots(vcpu->kvm);
+		int i = 0;
+		for (; i < 2; i++) {
+			int j = 0;
+			for (; j < default_kvm_state.ept_ctx.per_instance_slots; j++) {
+				kvm_set_memory_region(vcpu->kvm, &default_kvm_state.ept_ctx.userspace_memslots[i][j]);
+			}
+		}
+		// flush memslots to mmu
+		kvm_mmu_load(vcpu);
+		printk_show_mem_slots_info(vcpu);
+		ret = 0;
+		break;
 	}
 	default:
 		ret = -KVM_ENOSYS;
@@ -11398,6 +11636,31 @@ out:
 	return r;
 }
 
+int kvm_arch_vcpu_ioctl_get_mpstate_without_vcpu(struct kvm_vcpu *vcpu,
+				    struct kvm_mp_state *mp_state)
+{
+	int r;
+	if (kvm_mpx_supported())
+		kvm_load_guest_fpu(vcpu);
+
+	r = kvm_apic_accept_events(vcpu);
+	if (r < 0)
+		goto out;
+	r = 0;
+
+	if ((vcpu->arch.mp_state == KVM_MP_STATE_HALTED ||
+	     vcpu->arch.mp_state == KVM_MP_STATE_AP_RESET_HOLD) &&
+	    vcpu->arch.pv.pv_unhalted)
+		mp_state->mp_state = KVM_MP_STATE_RUNNABLE;
+	else
+		mp_state->mp_state = vcpu->arch.mp_state;
+
+out:
+	if (kvm_mpx_supported())
+		kvm_put_guest_fpu(vcpu);
+	return r;
+}
+
 int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
 				    struct kvm_mp_state *mp_state)
 {
@@ -11443,6 +11706,51 @@ int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
 	ret = 0;
 out:
 	vcpu_put(vcpu);
+	return ret;
+}
+
+int kvm_arch_vcpu_ioctl_set_mpstate_without_vcpu(struct kvm_vcpu *vcpu,
+				    struct kvm_mp_state *mp_state)
+{
+	int ret = -EINVAL;
+
+	switch (mp_state->mp_state) {
+	case KVM_MP_STATE_UNINITIALIZED:
+	case KVM_MP_STATE_HALTED:
+	case KVM_MP_STATE_AP_RESET_HOLD:
+	case KVM_MP_STATE_INIT_RECEIVED:
+	case KVM_MP_STATE_SIPI_RECEIVED:
+		if (!lapic_in_kernel(vcpu))
+			goto out;
+		break;
+
+	case KVM_MP_STATE_RUNNABLE:
+		break;
+
+	default:
+		goto out;
+	}
+
+	/*
+	 * Pending INITs are reported using KVM_SET_VCPU_EVENTS, disallow
+	 * forcing the guest into INIT/SIPI if those events are supposed to be
+	 * blocked.  KVM prioritizes SMI over INIT, so reject INIT/SIPI state
+	 * if an SMI is pending as well.
+	 */
+	if ((!kvm_apic_init_sipi_allowed(vcpu) || vcpu->arch.smi_pending) &&
+	    (mp_state->mp_state == KVM_MP_STATE_SIPI_RECEIVED ||
+	     mp_state->mp_state == KVM_MP_STATE_INIT_RECEIVED))
+		goto out;
+
+	if (mp_state->mp_state == KVM_MP_STATE_SIPI_RECEIVED) {
+		vcpu->arch.mp_state = KVM_MP_STATE_INIT_RECEIVED;
+		set_bit(KVM_APIC_SIPI, &vcpu->arch.apic->pending_events);
+	} else
+		vcpu->arch.mp_state = mp_state->mp_state;
+	kvm_make_request(KVM_REQ_EVENT, vcpu);
+
+	ret = 0;
+out:
 	return ret;
 }
 
