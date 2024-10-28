@@ -1,3 +1,4 @@
+#!/bin/bash
 make M=arch/x86/kvm
 rmmod kvm-intel
 rmmod kvm
