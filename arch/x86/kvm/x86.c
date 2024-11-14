@@ -10121,33 +10121,7 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 			vcpu->run->hypercall.flags |= KVM_EXIT_HYPERCALL_LONG_MODE;
 		vcpu->arch.complete_userspace_io = complete_hypercall_exit;
 		return 0;
-// 		save_kvm_state_to_snapshot(vcpu, &default_kvm_state);
-// 		save_kvm_userspace_memslot_mapping(&default_kvm_state, vcpu);
-//  	printk_show_memory_slot_in_userspace_mem(&default_kvm_state);
-// 		msleep(60000);                                                      
-//         ret = 0;
-//         break;
 	}
-	// case KVM_HC_RESTORE_FORK: {
-	// 	//printk_show_mem_slots_info(vcpu);
-	// 	//printk_show_memory_slot_in_userspace_mem(&default_kvm_state);
-	// 	restore_vcpu_state_from_snapshot(vcpu, &default_kvm_state);
-	// 	kvm_free_memslots(vcpu->kvm, vcpu->kvm->memslots[0]);
-	// 	kvm_free_memslots(vcpu->kvm, vcpu->kvm->memslots[1]);
-	// 	kvm_alloc_memslots(vcpu->kvm);
-	// 	int i = 0;
-	// 	for (; i < 2; i++) {
-	// 		int j = 0;
-	// 		for (; j < default_kvm_state.ept_ctx.per_instance_slots; j++) {
-	// 			kvm_set_memory_region(vcpu->kvm, &default_kvm_state.ept_ctx.userspace_memslots[i][j]);
-	// 		}
-	// 	}
-	// 	// flush memslots to mmu
-	// 	kvm_mmu_load(vcpu);
-	// 	printk_show_mem_slots_info(vcpu);
-	// 	ret = 0;
-	// 	break;
-	// }
 	default:
 		ret = -KVM_ENOSYS;
 		break;
