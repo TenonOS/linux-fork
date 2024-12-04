@@ -10117,6 +10117,28 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 	case KVM_HC_FORK_VM: {
 		vcpu->run->exit_reason			= KVM_EXIT_HYPERCALL;
 		vcpu->run->hypercall.nr			= KVM_HC_FORK_VM;
+		vcpu->run->hypercall.flags    = 0;
+		if (op_64_bit)
+			vcpu->run->hypercall.flags |= KVM_EXIT_HYPERCALL_LONG_MODE;
+		vcpu->arch.complete_userspace_io = complete_hypercall_exit;
+		return 0;
+	}
+	case KVM_HC_WAIT_VM: {
+		u64 pid = a0;
+		vcpu->run->exit_reason			= KVM_EXIT_HYPERCALL;
+		vcpu->run->hypercall.nr			= KVM_HC_WAIT_VM;
+		vcpu->run->hypercall.args[0]	= pid;
+		vcpu->run->hypercall.flags    = 0;
+		if (op_64_bit)
+			vcpu->run->hypercall.flags |= KVM_EXIT_HYPERCALL_LONG_MODE;
+		vcpu->arch.complete_userspace_io = complete_hypercall_exit;
+		return 0;
+	}
+	case KVM_HC_EXIT_VM: {
+		u64 pid = a0;
+		vcpu->run->exit_reason			= KVM_EXIT_HYPERCALL;
+		vcpu->run->hypercall.nr			= KVM_HC_EXIT_VM;
+		vcpu->run->hypercall.flags    = 0;
 		if (op_64_bit)
 			vcpu->run->hypercall.flags |= KVM_EXIT_HYPERCALL_LONG_MODE;
 		vcpu->arch.complete_userspace_io = complete_hypercall_exit;
